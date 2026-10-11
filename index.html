@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>별자리 캔버스</title>
+<style>
+  :root {
+    --panel-bg: rgba(10, 12, 24, 0.72);
+    --panel-border: rgba(255, 255, 255, 0.12);
+    --text: #e8ecff;
+    --muted: #9aa3c7;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060d; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; color: var(--text); }
+  canvas { display: block; position: fixed; inset: 0; touch-action: none; cursor: crosshair; }
+
+  .panel {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center;
+    padding: 10px 12px; max-width: calc(100vw - 32px);
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 14px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    transition: opacity .3s;
+  }
+  .panel.hidden { opacity: 0; pointer-events: none; }
+  button {
+    font: inherit; font-size: 13px; color: var(--text); cursor: pointer;
+    background: rgba(255,255,255,0.06); border: 1px solid var(--panel-border);
+    border-radius: 9px; padding: 7px 11px; white-space: nowrap;
+  }
+  button:hover { background: rgba(255,255,255,0.14); }
+  button.active { border-color: var(--accent, #8ab4ff); box-shadow: 0 0 0 1px var(--accent, #8ab4ff) inset; }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; vertical-align: -2px; margin-right: 6px; }
+  .sep { width: 1px; height: 22px; background: var(--panel-border); }
+  .hint {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    color: var(--muted); font-size: 14px; text-align: center; pointer-events: none;
+    transition: opacity 1s; padding: 0 16px;
+  }
+  .hint.gone { opacity: 0; }
+  .count { position: fixed; top: 16px; right: 16px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hint" id="hint">마우스를 움직이거나 화면을 드래그해 별을 뿌려 보세요 ✦<br><small>클릭하면 폭죽 · Space 일시정지 · H 패널 숨기기</small></div>
+<div class="count" id="count"></div>
+
+<div class="panel" id="panel">
+  <span id="themes"></span>
+  <span class="sep"></span>
+  <button id="gravityBtn" title="별들이 커서로 끌려옵니다 (G)">🧲 중력</button>
+  <button id="pauseBtn" title="Space">⏸ 정지</button>
+  <button id="clearBtn" title="C">🧹 지우기</button>
+  <button id="saveBtn" title="S">💾 PNG 저장</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const hint = document.getElementById('hint');
+  const countEl = document.getElementById('count');
+  const panel = document.getElementById('panel');
+
+  const THEMES = {
+    '은하수': { bg: '#05060d', colors: ['#ffffff', '#cfe0ff', '#9ab8ff', '#ffe9b0'] },
+    '오로라': { bg: '#020c0f', colors: ['#5effc8', '#4fd1ff', '#b58cff', '#e0fff6'] },
+    '석양':   { bg: '#120509', colors: ['#ff8a5c', '#ffcf6b', '#ff5e8a', '#ffe3d1'] },
+    '네온':   { bg: '#08020f', colors: ['#ff2fd6', '#2ff3ff', '#faff2f', '#9d2fff'] },
+  };
+  let themeName = '은하수';
+  let theme = THEMES[themeName];
+
+  const MAX_STARS = 900;
+  const LINK_DIST = 110;
+  let stars = [];
+  let paused = false;
+  let gravity = false;
+  let dpr = 1, W = 0, H = 0;
+  const pointer = { x: -9999, y: -9999, down: false, lastX: null, lastY: null, active: false };
+
+  // 배경에 깔리는 고정된 작은 별들
+  let bgStars = [];
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bgStars = Array.from({ length: Math.round(W * H / 4000) }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      r: Math.random() * 0.9 + 0.2, phase: Math.random() * Math.PI * 2,
+    }));
+  }
+
+  function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+
+  function spawn(x, y, burst = false) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = burst ? Math.random() * 4 + 1.5 : Math.random() * 0.6 + 0.1;
+    stars.push({
+      x, y,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      r: Math.random() * 1.8 + 0.8,
+      color: pick(theme.colors),
+      life: 1,
+      decay: burst ? 0.0025 + Math.random() * 0.002 : 0.0012 + Math.random() * 0.0015,
+      twinkle: Math.random() * Math.PI * 2,
+    });
+    if (stars.length > MAX_STARS) stars.splice(0, stars.length - MAX_STARS);
+  }
+
+  function trail(x, y) {
+    // 빠르게 움직여도 별이 끊기지 않도록 이전 위치와 사이를 보간
+    if (pointer.lastX === null) { pointer.lastX = x; pointer.lastY = y; }
+    const dx = x - pointer.lastX, dy = y - pointer.lastY;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.min(Math.floor(dist / 14), 12);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      spawn(pointer.lastX + dx * t + (Math.random() - .5) * 10, pointer.lastY + dy * t + (Math.random() - .5) * 10);
+    }
+    if (steps > 0) { pointer.lastX = x; pointer.lastY = y; }
+  }
+
+  function firework(x, y) {
+    for (let i = 0; i < 60; i++) spawn(x, y, true);
+  }
+
+  function hexToRgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+  // 공간 해시 그리드로 근접한 별만 비교 (O(n²) 회피)
+  function buildGrid() {
+    const grid = new Map();
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      const key = ((s.x / LINK_DIST) | 0) + ',' + ((s.y / LINK_DIST) | 0);
+      let cell = grid.get(key);
+      if (!cell) grid.set(key, cell = []);
+      cell.push(i);
+    }
+    return grid;
+  }
+
+  function drawLinks() {
+    const grid = buildGrid();
+    ctx.lineWidth = 0.7;
+    for (let i = 0; i < stars.length; i++) {
+      const a = stars[i];
+      const cx = (a.x / LINK_DIST) | 0, cy = (a.y / LINK_DIST) | 0;
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          const cell = grid.get(gx + ',' + gy);
+          if (!cell) continue;
+          for (const j of cell) {
+            if (j <= i) continue;
+            const b = stars[j];
+            const d = Math.hypot(a.x - b.x, a.y - b.y);
+            if (d > LINK_DIST) continue;
+            const alpha = (1 - d / LINK_DIST) * Math.min(a.life, b.life) * 0.55;
+            if (alpha < 0.02) continue;
+            const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+            g.addColorStop(0, hexToRgba(a.color, alpha));
+            g.addColorStop(1, hexToRgba(b.color, alpha));
+            ctx.strokeStyle = g;
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          }
+        }
+      }
+    }
+  }
+
+  function update() {
+    for (const s of stars) {
+      if (gravity && pointer.active) {
+        const dx = pointer.x - s.x, dy = pointer.y - s.y;
+        const d2 = dx * dx + dy * dy + 400;
+        const f = 60 / d2;
+        s.vx += dx * f; s.vy += dy * f;
+      }
+      s.vx *= 0.985; s.vy *= 0.985;
+      s.x += s.vx; s.y += s.vy;
+      s.life -= s.decay;
+      s.twinkle += 0.05;
+    }
+    stars = stars.filter(s => s.life > 0);
+  }
+
+  function draw(t) {
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const b of bgStars) {
+      ctx.globalAlpha = 0.25 + 0.25 * Math.sin(t / 900 + b.phase);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(b.x, b.y, b.r, b.r);
+    }
+    ctx.globalAlpha = 1;
+
+    drawLinks();
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (const s of stars) {
+      const tw = 0.75 + 0.25 * Math.sin(s.twinkle);
+      const r = s.r * tw;
+      const glow = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r * 6);
+      glow.addColorStop(0, hexToRgba(s.color, 0.5 * s.life));
+      glow.addColorStop(1, hexToRgba(s.color, 0));
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(s.x, s.y, r * 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hexToRgba(s.color, s.life);
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function loop(t) {
+    if (!paused) update();
+    draw(t);
+    countEl.textContent = `✦ ${stars.length}`;
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- 입력 ----------
+  let hintShown = true;
+  function dismissHint() {
+    if (hintShown) { hintShown = false; setTimeout(() => hint.classList.add('gone'), 1500); }
+  }
+
+  canvas.addEventListener('pointermove', e => {
+    pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true;
+    // 마우스는 호버만으로, 터치는 드래그 중에만 별을 뿌림
+    if (e.pointerType === 'mouse' || pointer.down) { trail(e.clientX, e.clientY); dismissHint(); }
+  });
+  canvas.addEventListener('pointerdown', e => {
+    pointer.down = true; pointer.active = true;
+    pointer.x = pointer.lastX = e.clientX; pointer.y = pointer.lastY = e.clientY;
+    firework(e.clientX, e.clientY);
+    dismissHint();
+  });
+  const release = () => { pointer.down = false; pointer.lastX = pointer.lastY = null; };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointerleave', () => { release(); pointer.active = false; });
+
+  // ---------- 컨트롤 ----------
+  const themesEl = document.getElementById('themes');
+  const themeButtons = {};
+  for (const [name, th] of Object.entries(THEMES)) {
+    const btn = document.createElement('button');
+    btn.innerHTML = `<span class="swatch" style="background:linear-gradient(135deg,${th.colors[0]},${th.colors[2]})"></span>${name}`;
+    btn.onclick = () => setTheme(name);
+    themesEl.appendChild(btn);
+    themesEl.appendChild(document.createTextNode(' '));
+    themeButtons[name] = btn;
+  }
+
+  function setTheme(name) {
+    themeName = name; theme = THEMES[name];
+    for (const [n, b] of Object.entries(themeButtons)) b.classList.toggle('active', n === name);
+    document.documentElement.style.setProperty('--accent', theme.colors[1]);
+    // 기존 별도 새 팔레트로 부드럽게 갈아입힘
+    for (const s of stars) s.color = pick(theme.colors);
+    try { localStorage.setItem('constellation-theme', name); } catch {}
+  }
+
+  const pauseBtn = document.getElementById('pauseBtn');
+  const gravityBtn = document.getElementById('gravityBtn');
+  function togglePause() { paused = !paused; pauseBtn.textContent = paused ? '▶ 재생' : '⏸ 정지'; }
+  function toggleGravity() { gravity = !gravity; gravityBtn.classList.toggle('active', gravity); }
+  function clearAll() { stars = []; }
+  function save() {
+    const a = document.createElement('a');
+    a.download = `constellation-${Date.now()}.png`;
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  }
+
+  pauseBtn.onclick = togglePause;
+  gravityBtn.onclick = toggleGravity;
+  document.getElementById('clearBtn').onclick = clearAll;
+  document.getElementById('saveBtn').onclick = save;
+
+  window.addEventListener('keydown', e => {
+    if (e.metaKey || e.ctrlKey) return;
+    switch (e.key.toLowerCase()) {
+      case ' ': e.preventDefault(); togglePause(); break;
+      case 'c': clearAll(); break;
+      case 's': save(); break;
+      case 'g': toggleGravity(); break;
+      case 'h': panel.classList.toggle('hidden'); break;
+      case '1': case '2': case '3': case '4': setTheme(Object.keys(THEMES)[+e.key - 1]); break;
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  let saved = null;
+  try { saved = localStorage.getItem('constellation-theme'); } catch {}
+  setTheme(THEMES[saved] ? saved : '은하수');
+
+  // 첫 화면이 비어 보이지 않도록 작은 별자리 하나를 미리 그려 둠
+  // (로드 직후엔 뷰포트 크기가 0일 수 있어 첫 프레임에서 배치)
+  requestAnimationFrame(t => {
+    if (!W || !H) resize();
+    for (let i = 0; i < 40; i++) spawn(W / 2 + (Math.random() - .5) * 260, H / 2 + (Math.random() - .5) * 160);
+    loop(t);
+  });
+})();
+</script>
+</body>
+</html>
